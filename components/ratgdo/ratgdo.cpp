@@ -683,6 +683,20 @@ void RATGDOComponent::obstruction_loop()
     constexpr uint32_t PULSES_LOWER_LIMIT = 3;
 
     if (current_millis - last_millis > CHECK_PERIOD) {
+#ifdef PROTOCOL_DRYCONTACT
+        // There is no sleep while the door is closing: the opener keeps its safety
+        // sensor awake the whole time, so the asleep test below does not apply. A window
+        // with PULSES_LOWER_LIMIT pulses or fewer, the same threshold as CLEAR below,
+        // means the pulse train was interrupted. The opener reverses at once, so the
+        // beam can be clear again long before the OBSTRUCTED rule below would apply.
+        if (*this->door_state == DoorState::CLOSING
+            && this->flags_.obstruction_sensor_detected
+            && this->isr_store_.obstruction_low_count <= PULSES_LOWER_LIMIT
+            && (this->dc_obstruction_while_closing_ == DryContactBehavior::STOP
+                || this->dc_obstruction_while_closing_ == DryContactBehavior::REVERSE)) {
+            this->dry_contact_obstructed();
+        }
+#endif
         // ESP_LOGD(TAG, "%ld: Obstruction count: %d, expected: %d, since asleep:
         // %ld",
         //     current_millis, this->isr_store_.obstruction_low_count,
@@ -703,7 +717,8 @@ void RATGDOComponent::obstruction_loop()
                 // there is an obstruction present
                 if (current_millis - last_asleep > 700) {
 #ifdef PROTOCOL_DRYCONTACT
-                    if (*this->obstruction_state != ObstructionState::OBSTRUCTED) {
+                    // Closing is handled by the fast path above.
+                    if (*this->obstruction_state != ObstructionState::OBSTRUCTED && *this->door_state == DoorState::OPENING) {
                         this->dry_contact_obstructed();
                     }
 #endif
@@ -1000,12 +1015,18 @@ void RATGDOComponent::door_move_to_position(float position)
     enc_intended_dir_ = (delta > 0) ? 1 : -1;
 #endif
     this->door_action(delta > 0 ? DoorAction::OPEN : DoorAction::CLOSE);
+#ifdef PROTOCOL_DRYCONTACT
+    this->dry_contact_move_started(delta > 0 ? DoorState::OPENING : DoorState::CLOSING);
+#endif
     this->set_timeout(TIMEOUT_MOVE_TO_POSITION, operation_time,
         [this] {
 #ifdef RATGDO_USE_ENCODER
             flags_.enc_position_stop_pending = true;
 #endif
             this->door_action(DoorAction::STOP);
+#ifdef PROTOCOL_DRYCONTACT
+            this->dry_contact_move_stopped();
+#endif
         });
 }
 
@@ -1032,22 +1053,24 @@ void RATGDOComponent::cancel_position_sync_callbacks()
 #ifdef PROTOCOL_DRYCONTACT
 
 // A dry contact opener with a single button input only understands "toggle", and what
-// a toggle does depends on the opener and on the door state. toggle_while_opening and
-// toggle_while_closing describe what ONE toggle does while the door moves. A toggle
-// while STOPPED is assumed to reverse the last direction of travel. A logical
-// OPEN/CLOSE/STOP is reached by sending one toggle at a time and re-evaluating once
-// its result is resolved, either inferred (limit switch builds have no feedback
-// mid-travel) or reported by the encoder. Endpoints and a stopped door with an
-// unknown last direction are handed to the normal door_open()/door_close() paths.
+// a toggle does depends on the opener and on the door state. toggle_while_opening,
+// toggle_while_closing and toggle_while_stopped describe what ONE toggle does in that
+// state; a reverse from STOPPED goes opposite to the last direction of travel. A
+// logical OPEN/CLOSE/STOP is reached by sending one toggle at a time and re-evaluating
+// once its result is resolved: inferred at the press when there is no encoder (limit
+// switch builds have no feedback mid-travel), reported by the encoder otherwise.
+// Endpoints and a stopped door with an unknown last direction are handed to the normal
+// door_open()/door_close() paths.
 //
 // Invariant: while dc_request_ != UNKNOWN, TIMEOUT_DRY_CONTACT_STEP is scheduled, so
 // a request can never linger and act on some later, unrelated state change.
 
-// Minimum interval between automatically generated toggles. The dry contact output
-// holds each press for 500 ms on an anonymous timeout; a second press inside that
-// window would be merged into the first one, and the opener needs the output released
-// for a while before it sees a new press.
-static constexpr uint32_t DRY_CONTACT_MIN_TOGGLE_INTERVAL_MS = 1000;
+// Minimum interval between automatically generated presses. The dry contact output
+// holds each press for 500 ms on an anonymous timeout, so a second press inside that
+// window would merge with the first one. The next press waits for the previous result,
+// but that result is inferred at the press without an encoder and can be reported
+// before the pulse ends with one, so this interval is what keeps presses apart.
+static constexpr uint32_t DRY_CONTACT_MIN_TOGGLE_INTERVAL_MS = 600;
 // Longest time to wait for the encoder to report the result of a toggle. A stop is
 // only reported ENC_STOPPED_WATCHDOG_MS after the last pulse and a reversal needs
 // ENC_DIRECTION_CHANGE_THRESHOLD pulses, so this has to be a few seconds.
@@ -1070,25 +1093,30 @@ static bool dry_contact_request_reached(DoorAction action, DoorState state)
     }
 }
 
-static DoorState dry_contact_apply(DryContactBehavior behavior, DoorState moving, DoorState reversed)
+// Result of a toggle or an obstruction while moving in direction "moving".
+static DoorState dry_contact_apply(DryContactBehavior behavior, DoorState moving)
 {
     if (behavior == DryContactBehavior::STOP)
         return DoorState::STOPPED;
     if (behavior == DryContactBehavior::REVERSE)
-        return reversed;
+        return moving == DoorState::OPENING ? DoorState::CLOSING : DoorState::OPENING;
     return moving; // IGNORE
 }
 
 DoorState RATGDOComponent::dry_contact_toggle_result(DoorState state) const
 {
     if (state == DoorState::OPENING)
-        return dry_contact_apply(this->dc_toggle_while_opening_, DoorState::OPENING, DoorState::CLOSING);
+        return dry_contact_apply(this->dc_toggle_while_opening_, DoorState::OPENING);
     if (state == DoorState::CLOSING)
-        return dry_contact_apply(this->dc_toggle_while_closing_, DoorState::CLOSING, DoorState::OPENING);
-    if (state == DoorState::STOPPED && this->dc_last_direction_ == DoorState::OPENING)
-        return DoorState::CLOSING;
-    if (state == DoorState::STOPPED && this->dc_last_direction_ == DoorState::CLOSING)
-        return DoorState::OPENING;
+        return dry_contact_apply(this->dc_toggle_while_closing_, DoorState::CLOSING);
+    if (state == DoorState::STOPPED) {
+        if (this->dc_toggle_while_stopped_ == DryContactBehavior::IGNORE)
+            return DoorState::STOPPED;
+        if (this->dc_last_direction_ == DoorState::OPENING)
+            return DoorState::CLOSING;
+        if (this->dc_last_direction_ == DoorState::CLOSING)
+            return DoorState::OPENING;
+    }
     return DoorState::UNKNOWN; // OPEN, CLOSED, UNKNOWN, or STOPPED with no known direction
 }
 
@@ -1106,13 +1134,6 @@ bool RATGDOComponent::dry_contact_request(DoorAction action)
             LOG_STR_ARG(DoorAction_to_string(this->dc_request_)), LOG_STR_ARG(DoorAction_to_string(action)));
         this->dc_request_ = action;
         this->dc_toggles_ = 0;
-        if (!dry_contact_request_reached(action, this->dc_expected_) && this->dry_contact_cancel_delayed_toggle()) {
-            // The press waiting out the closing delay would now work against the
-            // request; it was never sent, so plan again from the current state.
-            this->flags_.dc_toggle_pending = false;
-            this->cancel_timeout(TIMEOUT_DRY_CONTACT_STEP);
-            this->dry_contact_step();
-        }
         return true;
     }
     const DoorState state = *this->door_state;
@@ -1129,7 +1150,7 @@ bool RATGDOComponent::dry_contact_request(DoorAction action)
     this->dc_toggles_ = 0;
     // A query timer armed by an earlier door_open()/door_close() would later assume
     // the door reached that endpoint, and a move-to-position timer would send a stray
-    // toggle into this sequence.
+    // press into this sequence.
     this->cancel_timeout(TIMEOUT_DOOR_QUERY_STATE);
     this->cancel_timeout(TIMEOUT_MOVE_TO_POSITION);
 #ifdef RATGDO_USE_ENCODER
@@ -1151,18 +1172,10 @@ void RATGDOComponent::dry_contact_step()
     if (dry_contact_request_reached(this->dc_request_, state)) {
         ESP_LOGD(TAG, "Dry contact: %s done, door %s",
             LOG_STR_ARG(DoorAction_to_string(this->dc_request_)), LOG_STR_ARG(DoorState_to_string(state)));
-#ifdef RATGDO_USE_ENCODER
-        // Hand the direction back to the wrong-direction correction for the rest of the
-        // move, as door_open()/door_close() would have left it.
-        if (this->encoder_sensor_ != nullptr) {
-            if (this->dc_request_ == DoorAction::OPEN && state == DoorState::OPENING) {
-                this->enc_intended_dir_ = 1;
-            } else if (this->dc_request_ == DoorAction::CLOSE && state == DoorState::CLOSING) {
-                this->enc_intended_dir_ = -1;
-            }
-        }
-#endif
         this->dc_request_ = DoorAction::UNKNOWN;
+        if (state == DoorState::OPENING || state == DoorState::CLOSING) {
+            this->dry_contact_arm_query_state(state);
+        }
         return;
     }
     // Applies to every press this sequence makes, including the hand-off below.
@@ -1211,7 +1224,6 @@ void RATGDOComponent::dry_contact_send_toggle(DoorState expected)
         delay = *this->closing_delay * 1000;
     }
 #endif
-    this->flags_.dc_toggle_delayed = delay > 0;
     if (delay > 0) {
         this->door_action(DoorAction::TOGGLE);
     } else {
@@ -1232,35 +1244,94 @@ void RATGDOComponent::dry_contact_send_toggle(DoorState expected)
         return;
     }
 #endif
-    // No feedback until a limit switch changes: apply the configured result once the
-    // press has been released.
-    this->set_timeout(TIMEOUT_DRY_CONTACT_STEP, delay + DRY_CONTACT_MIN_TOGGLE_INTERVAL_MS,
-        [this] { this->received(this->dc_expected_); });
+    // No feedback until a limit switch changes: apply the configured result when the
+    // press is made. Deferred to the scheduler (not called here) so callers such as
+    // door_move_to_position() can register their on_door_state() callback first.
+    this->set_timeout(TIMEOUT_DRY_CONTACT_STEP, delay, [this] { this->received(this->dc_expected_); });
+}
+
+// Mirrors the query timers that door_open() and door_close() arm, for a sequence
+// that ends with the door moving.
+void RATGDOComponent::dry_contact_arm_query_state(DoorState moving)
+{
+    if (!this->assume_endpoint_after_travel()) {
+        return;
+    }
+    if (moving == DoorState::OPENING && *this->opening_duration > 0) {
+        this->set_timeout(TIMEOUT_DOOR_QUERY_STATE, (*this->opening_duration + 2) * 1000, [this]() {
+            if (*this->door_state != DoorState::OPEN
+                && *this->door_state != DoorState::STOPPED
+#ifdef RATGDO_USE_ENCODER
+                && *this->door_state != DoorState::CLOSED
+#endif
+            ) {
+                this->received(DoorState::OPEN); // probably missed a status message, assume it's open
+                this->query_status();
+            }
+        });
+    } else if (moving == DoorState::CLOSING && *this->closing_duration > 0) {
+        this->set_timeout(TIMEOUT_DOOR_QUERY_STATE, (*this->closing_duration + 2) * 1000, [this]() {
+            if (*this->door_state != DoorState::CLOSED
+                && *this->door_state != DoorState::STOPPED
+                && *this->door_state != DoorState::OPEN) {
+                this->received(DoorState::CLOSED); // probably missed a status message, assume it's closed
+                this->query_status();
+            }
+        });
+    }
+}
+
+// door_move_to_position() presses without going through the sequence above. Without
+// an encoder nothing reports that motion mid-travel, so the direction confirmed by
+// dry_contact_can_move_to_position() is applied at the start press and STOPPED at the
+// end press; the existing OPENING/CLOSING and STOPPED handling then runs and freezes
+// the position estimate. Reaching a limit first cancels the end press, because the
+// OPEN/CLOSED handling cancels TIMEOUT_MOVE_TO_POSITION once the door is moving.
+bool RATGDOComponent::dry_contact_infer_move() const
+{
+    if (this->dc_toggle_while_opening_ == DryContactBehavior::UNSET) {
+        return false;
+    }
+#ifdef RATGDO_USE_ENCODER
+    if (this->encoder_sensor_ != nullptr) {
+        return false; // the encoder reports the actual motion
+    }
+#endif
+    return true;
+}
+
+void RATGDOComponent::dry_contact_move_started(DoorState dir)
+{
+    if (!this->dry_contact_infer_move()) {
+        return;
+    }
+    uint32_t delay = 0;
+#ifdef RATGDO_USE_CLOSING_DELAY
+    // door_action(CLOSE) sends the press only after the closing delay.
+    if (dir == DoorState::CLOSING) {
+        delay = *this->closing_delay * 1000;
+    }
+#endif
+    this->dc_next_toggle_ms_ = millis() + delay + DRY_CONTACT_MIN_TOGGLE_INTERVAL_MS;
+    // Deferred to the scheduler so the resolved-state handling does not run inside
+    // door_move_to_position(). No request is active here, so the step timer is free.
+    this->set_timeout(TIMEOUT_DRY_CONTACT_STEP, delay, [this, dir] { this->received(dir); });
+}
+
+void RATGDOComponent::dry_contact_move_stopped()
+{
+    if (!this->dry_contact_infer_move()) {
+        return;
+    }
+    this->dc_next_toggle_ms_ = millis() + DRY_CONTACT_MIN_TOGGLE_INTERVAL_MS;
+    this->received(DoorState::STOPPED);
 }
 
 void RATGDOComponent::dry_contact_cancel()
 {
-    this->dry_contact_cancel_delayed_toggle();
     this->dc_request_ = DoorAction::UNKNOWN;
     this->flags_.dc_toggle_pending = false;
     this->cancel_timeout(TIMEOUT_DRY_CONTACT_STEP);
-}
-
-// Returns true when the toggle waiting out the closing delay had not been sent yet
-// and is now dropped. The press before it was at least the minimum interval ago, so
-// the next press may go at once.
-bool RATGDOComponent::dry_contact_cancel_delayed_toggle()
-{
-    if (!this->flags_.dc_toggle_delayed) {
-        return false;
-    }
-    this->flags_.dc_toggle_delayed = false;
-    if (!this->cancel_timeout(TIMEOUT_DOOR_ACTION)) {
-        return false; // already sent
-    }
-    this->door_action_delayed = DoorActionDelayed::NO;
-    this->dc_next_toggle_ms_ = millis();
-    return true;
 }
 
 // Called at the end of set_resolved_door_state() for every resolved change.
@@ -1276,9 +1347,7 @@ void RATGDOComponent::dry_contact_on_resolved(DoorState state)
     this->cancel_timeout(TIMEOUT_DRY_CONTACT_STEP);
     if (this->flags_.dc_toggle_pending) {
         this->flags_.dc_toggle_pending = false;
-        // A press still waiting out the closing delay did not cause this change; it is
-        // dropped and the next step plans from the actual state.
-        if (!this->dry_contact_cancel_delayed_toggle() && state != this->dc_expected_) {
+        if (state != this->dc_expected_) {
             // An endpoint, a manual press or a wrong behavior setting; whichever it is,
             // pressing again on a guess could move the door the wrong way.
             ESP_LOGW(TAG, "Dry contact: expected %s after toggle, door is %s; stopping %s",
@@ -1291,35 +1360,45 @@ void RATGDOComponent::dry_contact_on_resolved(DoorState state)
     this->dry_contact_step();
 }
 
-// Called by obstruction_loop() when the obstruction sensor becomes obstructed.
+// Called by obstruction_loop() for an obstruction while closing (every window without
+// the clear pulse pattern) or at the start of an obstruction while opening.
 void RATGDOComponent::dry_contact_obstructed()
 {
     if (this->dc_request_ != DoorAction::UNKNOWN) {
         ESP_LOGD(TAG, "Dry contact: obstruction, dropping %s", LOG_STR_ARG(DoorAction_to_string(this->dc_request_)));
         this->dry_contact_cancel();
     }
-    if (*this->door_state != DoorState::CLOSING
-        || this->dc_obstruction_while_closing_ == DryContactBehavior::UNSET
-        || this->dc_obstruction_while_closing_ == DryContactBehavior::IGNORE) {
+    const DoorState state = *this->door_state;
+    DryContactBehavior behavior = DryContactBehavior::UNSET;
+    if (state == DoorState::OPENING) {
+        behavior = this->dc_obstruction_while_opening_;
+    } else if (state == DoorState::CLOSING) {
+        behavior = this->dc_obstruction_while_closing_;
+    }
+    if (behavior == DryContactBehavior::UNSET || behavior == DryContactBehavior::IGNORE) {
         return;
     }
     // The opener stops or reverses by itself; nothing is sent to it. A query timer
-    // from door_close() would otherwise assume CLOSED later.
+    // from door_open()/door_close() would otherwise assume the endpoint later.
     this->cancel_timeout(TIMEOUT_DOOR_QUERY_STATE);
 #ifdef RATGDO_USE_ENCODER
-    // The close intent is void; the reversal must not be corrected as wrong-way travel.
+    // The earlier intent is void; the opener's own reaction must not be corrected as
+    // wrong-way travel.
     this->enc_intended_dir_ = 0;
     this->enc_dir_correction_pending_ = false;
     if (this->encoder_sensor_ != nullptr) {
         return; // the encoder reports the actual motion
     }
 #endif
-    this->received(this->dc_obstruction_while_closing_ == DryContactBehavior::REVERSE ? DoorState::OPENING : DoorState::STOPPED);
+    ESP_LOGD(TAG, "Dry contact: obstruction while %s, behavior %s", LOG_STR_ARG(DoorState_to_string(state)),
+        LOG_STR_ARG(DryContactBehavior_to_string(behavior)));
+    this->received(dry_contact_apply(behavior, state));
 }
 
-// door_move_to_position() starts with one toggle and ends with one toggle, so it only
-// works when that end toggle stops the door, and, without an encoder, when the start
-// toggle from STOPPED goes the right way.
+// door_move_to_position() starts with one press and ends with one press, so it only
+// works when that end press stops the door and the start press from STOPPED moves it
+// (without an encoder, also in the right direction). A move that follows a press of
+// this sequence is deferred until that press has been released.
 bool RATGDOComponent::dry_contact_can_move_to_position(float position)
 {
     if (this->dc_toggle_while_opening_ == DryContactBehavior::UNSET) {
@@ -1335,15 +1414,33 @@ bool RATGDOComponent::dry_contact_can_move_to_position(float position)
             LOG_STR_ARG(DoorState_to_string(dir)));
         return false;
     }
+    const DoorState state = *this->door_state;
+    const bool moving = state == DoorState::OPENING || state == DoorState::CLOSING;
+    if (moving && this->dry_contact_toggle_result(state) != DoorState::STOPPED) {
+        ESP_LOGW(TAG, "Dry contact: opener does not stop on toggle while %s, ignoring move to position",
+            LOG_STR_ARG(DoorState_to_string(state)));
+        return false;
+    }
+    if ((moving || state == DoorState::STOPPED) && this->dc_toggle_while_stopped_ == DryContactBehavior::IGNORE) {
+        ESP_LOGW(TAG, "Dry contact: opener ignores toggle while stopped, ignoring move to position");
+        return false;
+    }
+    if (!moving) {
+        const int32_t wait = static_cast<int32_t>(this->dc_next_toggle_ms_ - millis());
+        if (wait > 0) {
+            this->set_timeout(TIMEOUT_MOVE_TO_POSITION, static_cast<uint32_t>(wait),
+                [this, position] { this->door_move_to_position(position); });
+            return false;
+        }
+    }
 #ifdef RATGDO_USE_ENCODER
     if (this->encoder_sensor_ != nullptr) {
         return true; // the wrong-direction correction handles a start in the wrong direction
     }
 #endif
-    const DoorState state = *this->door_state;
     // A moving door is stopped first and then keeps its current direction as the last one.
-    const DoorState last = (state == DoorState::OPENING || state == DoorState::CLOSING) ? state : this->dc_last_direction_;
-    if ((state == DoorState::STOPPED || state == DoorState::OPENING || state == DoorState::CLOSING) && last == dir) {
+    const DoorState last = moving ? state : this->dc_last_direction_;
+    if ((moving || state == DoorState::STOPPED) && last == dir) {
         ESP_LOGW(TAG, "Dry contact: a toggle would start the door away from the target, ignoring move to position");
         return false;
     }

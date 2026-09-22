@@ -147,10 +147,12 @@ CONF_ENCODER_PIN_A = "encoder_pin_a"
 CONF_ENCODER_PIN_B = "encoder_pin_b"
 CONF_ENCODER_SENSOR = "encoder_sensor"
 
-# What one press of the dry contact single button does while the door moves, and
-# what the opener does by itself when the obstruction sensor trips while closing.
+# What one press of the dry contact single button does in each door state, and what
+# the opener does by itself when the obstruction sensor trips while moving.
 CONF_TOGGLE_WHILE_OPENING = "toggle_while_opening"
 CONF_TOGGLE_WHILE_CLOSING = "toggle_while_closing"
+CONF_TOGGLE_WHILE_STOPPED = "toggle_while_stopped"
+CONF_OBSTRUCTION_WHILE_OPENING = "obstruction_while_opening"
 CONF_OBSTRUCTION_WHILE_CLOSING = "obstruction_while_closing"
 DryContactBehavior = ratgdo_ns.enum("DryContactBehavior", is_class=True)
 DRY_CONTACT_BEHAVIORS = {
@@ -158,6 +160,18 @@ DRY_CONTACT_BEHAVIORS = {
     "stop": DryContactBehavior.STOP,
     "reverse": DryContactBehavior.REVERSE,
 }
+# A stopped door cannot be stopped; reverse goes opposite to the last direction.
+DRY_CONTACT_STOPPED_BEHAVIORS = {
+    "ignore": DryContactBehavior.IGNORE,
+    "reverse": DryContactBehavior.REVERSE,
+}
+DRY_CONTACT_BEHAVIOR_KEYS = (
+    CONF_TOGGLE_WHILE_OPENING,
+    CONF_TOGGLE_WHILE_CLOSING,
+    CONF_TOGGLE_WHILE_STOPPED,
+    CONF_OBSTRUCTION_WHILE_OPENING,
+    CONF_OBSTRUCTION_WHILE_CLOSING,
+)
 # Report OPEN and CLOSED only from the dry contact limit switches, instead of
 # assuming the endpoint once the travel duration has passed.
 CONF_REQUIRE_LIMIT_SWITCH_ENDPOINTS = "require_limit_switch_endpoints"
@@ -192,17 +206,13 @@ def validate_protocol(config):
             "when using protocol drycontact"
         )
 
-    behavior_keys = (
-        CONF_TOGGLE_WHILE_OPENING,
-        CONF_TOGGLE_WHILE_CLOSING,
-        CONF_OBSTRUCTION_WHILE_CLOSING,
-    )
-    if not is_dry and any(key in config for key in behavior_keys):
+    if not is_dry and any(key in config for key in DRY_CONTACT_BEHAVIOR_KEYS):
         raise cv.Invalid(
-            f"{', '.join(behavior_keys)} are only valid when using protocol drycontact"
+            f"{', '.join(DRY_CONTACT_BEHAVIOR_KEYS)} are only valid when using protocol drycontact"
         )
-    if CONF_OBSTRUCTION_WHILE_CLOSING in config and not config.get(CONF_INPUT_OBST):
-        raise cv.Invalid(f"{CONF_OBSTRUCTION_WHILE_CLOSING} requires {CONF_INPUT_OBST}")
+    for key in (CONF_OBSTRUCTION_WHILE_OPENING, CONF_OBSTRUCTION_WHILE_CLOSING):
+        if key in config and not config.get(CONF_INPUT_OBST):
+            raise cv.Invalid(f"{key} requires {CONF_INPUT_OBST}")
     if config.get(CONF_REQUIRE_LIMIT_SWITCH_ENDPOINTS):
         if not is_dry:
             raise cv.Invalid(
@@ -273,6 +283,12 @@ CONFIG_SCHEMA = cv.All(
             cv.Inclusive(CONF_TOGGLE_WHILE_CLOSING, "dry_contact_toggle"): cv.enum(
                 DRY_CONTACT_BEHAVIORS, lower=True
             ),
+            cv.Inclusive(CONF_TOGGLE_WHILE_STOPPED, "dry_contact_toggle"): cv.enum(
+                DRY_CONTACT_STOPPED_BEHAVIORS, lower=True
+            ),
+            cv.Optional(CONF_OBSTRUCTION_WHILE_OPENING): cv.enum(
+                DRY_CONTACT_BEHAVIORS, lower=True
+            ),
             cv.Optional(CONF_OBSTRUCTION_WHILE_CLOSING): cv.enum(
                 DRY_CONTACT_BEHAVIORS, lower=True
             ),
@@ -329,6 +345,15 @@ async def to_code(config):
         )
         cg.add(
             var.set_dry_contact_toggle_while_closing(config[CONF_TOGGLE_WHILE_CLOSING])
+        )
+        cg.add(
+            var.set_dry_contact_toggle_while_stopped(config[CONF_TOGGLE_WHILE_STOPPED])
+        )
+    if CONF_OBSTRUCTION_WHILE_OPENING in config:
+        cg.add(
+            var.set_dry_contact_obstruction_while_opening(
+                config[CONF_OBSTRUCTION_WHILE_OPENING]
+            )
         )
     if CONF_OBSTRUCTION_WHILE_CLOSING in config:
         cg.add(
