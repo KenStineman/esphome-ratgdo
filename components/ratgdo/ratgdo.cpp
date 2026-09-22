@@ -197,6 +197,9 @@ void RATGDOComponent::dump_config()
     LOG_PIN("  Output GDO Pin: ", this->output_gdo_pin_);
     LOG_PIN("  Input GDO Pin: ", this->input_gdo_pin_);
     LOG_PIN("  Input Obstruction Pin: ", this->input_obst_pin_);
+#ifdef PROTOCOL_DRYCONTACT
+    ESP_LOGCONFIG(TAG, "  Require limit switch endpoints: %s", YESNO(this->flags_.require_limit_switch_endpoints));
+#endif
     this->protocol_->dump_config();
 }
 
@@ -833,7 +836,7 @@ void RATGDOComponent::door_open()
 #endif
     this->door_action(DoorAction::OPEN);
 
-    if (*this->opening_duration > 0) {
+    if (*this->opening_duration > 0 && this->assume_endpoint_after_travel()) {
         // query state in case we don't get a status message
         this->set_timeout(
             TIMEOUT_DOOR_QUERY_STATE, (*this->opening_duration + 2) * 1000,
@@ -907,7 +910,7 @@ void RATGDOComponent::door_close()
         this->door_action(DoorAction::TOGGLE);
     }
 
-    if (*this->closing_duration > 0) {
+    if (*this->closing_duration > 0 && this->assume_endpoint_after_travel()) {
         // query state in case we don't get a status message
         this->set_timeout(
             TIMEOUT_DOOR_QUERY_STATE, (*this->closing_duration + 2) * 1000,

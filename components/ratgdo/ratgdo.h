@@ -193,6 +193,7 @@ public:
     void set_dry_contact_toggle_while_opening(DryContactBehavior b) { this->dc_toggle_while_opening_ = b; }
     void set_dry_contact_toggle_while_closing(DryContactBehavior b) { this->dc_toggle_while_closing_ = b; }
     void set_dry_contact_obstruction_while_closing(DryContactBehavior b) { this->dc_obstruction_while_closing_ = b; }
+    void set_require_limit_switch_endpoints(bool value) { this->flags_.require_limit_switch_endpoints = value; }
 #endif
 
 #ifdef RATGDO_USE_ENCODER
@@ -437,8 +438,20 @@ protected:
 #ifdef PROTOCOL_DRYCONTACT
         uint8_t dc_toggle_pending : 1; // an automatic toggle was sent and its result is not resolved yet
         uint8_t dc_toggle_delayed : 1; // that toggle went through the closing delay (TIMEOUT_DOOR_ACTION)
+        uint8_t require_limit_switch_endpoints : 1; // OPEN/CLOSED only from the limit switches
 #endif
     } flags_ { 0 };
+
+    // Whether door_open()/door_close() may assume the endpoint once the travel
+    // duration has passed without a status update.
+    bool assume_endpoint_after_travel() const
+    {
+#ifdef PROTOCOL_DRYCONTACT
+        return !this->flags_.require_limit_switch_endpoints;
+#else
+        return true;
+#endif
+    }
 
 #ifdef RATGDO_USE_ENCODER
     esphome::sensor::Sensor* encoder_sensor_ { nullptr };

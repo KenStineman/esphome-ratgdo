@@ -158,6 +158,9 @@ DRY_CONTACT_BEHAVIORS = {
     "stop": DryContactBehavior.STOP,
     "reverse": DryContactBehavior.REVERSE,
 }
+# Report OPEN and CLOSED only from the dry contact limit switches, instead of
+# assuming the endpoint once the travel duration has passed.
+CONF_REQUIRE_LIMIT_SWITCH_ENDPOINTS = "require_limit_switch_endpoints"
 
 
 def validate_protocol(config):
@@ -200,6 +203,16 @@ def validate_protocol(config):
         )
     if CONF_OBSTRUCTION_WHILE_CLOSING in config and not config.get(CONF_INPUT_OBST):
         raise cv.Invalid(f"{CONF_OBSTRUCTION_WHILE_CLOSING} requires {CONF_INPUT_OBST}")
+    if config.get(CONF_REQUIRE_LIMIT_SWITCH_ENDPOINTS):
+        if not is_dry:
+            raise cv.Invalid(
+                f"{CONF_REQUIRE_LIMIT_SWITCH_ENDPOINTS} is only valid when using protocol drycontact"
+            )
+        if has_encoder:
+            raise cv.Invalid(
+                f"{CONF_REQUIRE_LIMIT_SWITCH_ENDPOINTS} requires dry_contact_open_sensor "
+                "and dry_contact_close_sensor and cannot be used with encoder_sensor"
+            )
 
     if has_encoder:
         has_pin_a = CONF_ENCODER_PIN_A in config
@@ -263,6 +276,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_OBSTRUCTION_WHILE_CLOSING): cv.enum(
                 DRY_CONTACT_BEHAVIORS, lower=True
             ),
+            cv.Optional(CONF_REQUIRE_LIMIT_SWITCH_ENDPOINTS): cv.boolean,
         }
     ).extend(cv.COMPONENT_SCHEMA),
     validate_protocol,
@@ -322,6 +336,8 @@ async def to_code(config):
                 config[CONF_OBSTRUCTION_WHILE_CLOSING]
             )
         )
+    if config.get(CONF_REQUIRE_LIMIT_SWITCH_ENDPOINTS):
+        cg.add(var.set_require_limit_switch_endpoints(True))
 
     if config.get(CONF_ENCODER_PIN_A):
         pin = await cg.gpio_pin_expression(config[CONF_ENCODER_PIN_A])
