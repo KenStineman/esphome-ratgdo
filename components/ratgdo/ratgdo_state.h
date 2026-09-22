@@ -28,7 +28,7 @@ ENUM(DoorState, uint8_t,
 
 /// What one press of the dry contact single button does in a given door state, or
 /// what the opener does by itself when the obstruction sensor trips while moving.
-/// UNSET keeps the existing behaviour.
+/// UNSET keeps the existing behavior.
 ENUM(DryContactBehavior, uint8_t,
     (UNSET, 0),
     (IGNORE, 1),

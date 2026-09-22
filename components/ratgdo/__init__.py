@@ -108,6 +108,9 @@ CONF_INPUT_OBST = "input_obst_pin"
 DEFAULT_INPUT_OBST = "D7"  # D7 black obstruction sensor terminal
 
 CONF_OBST_SLEEP_LOW = "obst_sleep_low"
+# Report OPEN and CLOSED only from the dry contact limit switches, instead of
+# assuming the endpoint once the travel duration has passed.
+CONF_REQUIRE_LIMIT_SWITCH_ENDPOINTS = "require_limit_switch_endpoints"
 
 CONF_DISCRETE_OPEN_PIN = "discrete_open_pin"
 CONF_DISCRETE_CLOSE_PIN = "discrete_close_pin"
@@ -172,9 +175,6 @@ DRY_CONTACT_BEHAVIOR_KEYS = (
     CONF_OBSTRUCTION_WHILE_OPENING,
     CONF_OBSTRUCTION_WHILE_CLOSING,
 )
-# Report OPEN and CLOSED only from the dry contact limit switches, instead of
-# assuming the endpoint once the travel duration has passed.
-CONF_REQUIRE_LIMIT_SWITCH_ENDPOINTS = "require_limit_switch_endpoints"
 
 
 def validate_protocol(config):
@@ -213,16 +213,6 @@ def validate_protocol(config):
     for key in (CONF_OBSTRUCTION_WHILE_OPENING, CONF_OBSTRUCTION_WHILE_CLOSING):
         if key in config and not config.get(CONF_INPUT_OBST):
             raise cv.Invalid(f"{key} requires {CONF_INPUT_OBST}")
-    if config.get(CONF_REQUIRE_LIMIT_SWITCH_ENDPOINTS):
-        if not is_dry:
-            raise cv.Invalid(
-                f"{CONF_REQUIRE_LIMIT_SWITCH_ENDPOINTS} is only valid when using protocol drycontact"
-            )
-        if has_encoder:
-            raise cv.Invalid(
-                f"{CONF_REQUIRE_LIMIT_SWITCH_ENDPOINTS} requires dry_contact_open_sensor "
-                "and dry_contact_close_sensor and cannot be used with encoder_sensor"
-            )
 
     if has_encoder:
         has_pin_a = CONF_ENCODER_PIN_A in config
@@ -239,6 +229,17 @@ def validate_protocol(config):
         raise cv.Invalid(
             "encoder_pin_a and encoder_pin_b are only valid when using encoder_sensor"
         )
+
+    if config.get(CONF_REQUIRE_LIMIT_SWITCH_ENDPOINTS):
+        if not is_dry:
+            raise cv.Invalid(
+                f"{CONF_REQUIRE_LIMIT_SWITCH_ENDPOINTS} is only valid when using protocol drycontact"
+            )
+        if has_encoder:
+            raise cv.Invalid(
+                f"{CONF_REQUIRE_LIMIT_SWITCH_ENDPOINTS} requires dry_contact_open_sensor "
+                "and dry_contact_close_sensor and cannot be used with encoder_sensor"
+            )
     return config
 
 
@@ -256,6 +257,7 @@ CONFIG_SCHEMA = cv.All(
                 cv.none, pins.gpio_input_pin_schema
             ),
             cv.SplitDefault(CONF_OBST_SLEEP_LOW, esp32=False, esp8266=True): cv.boolean,
+            cv.Optional(CONF_REQUIRE_LIMIT_SWITCH_ENDPOINTS): cv.boolean,
             cv.Optional(CONF_DISCRETE_OPEN_PIN): pins.gpio_output_pin_schema,
             cv.Optional(CONF_DISCRETE_CLOSE_PIN): pins.gpio_output_pin_schema,
             cv.Optional(CONF_ON_SYNC_FAILED): automation.validate_automation(
@@ -292,7 +294,6 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_OBSTRUCTION_WHILE_CLOSING): cv.enum(
                 DRY_CONTACT_BEHAVIORS, lower=True
             ),
-            cv.Optional(CONF_REQUIRE_LIMIT_SWITCH_ENDPOINTS): cv.boolean,
         }
     ).extend(cv.COMPONENT_SCHEMA),
     validate_protocol,
@@ -322,6 +323,8 @@ async def to_code(config):
         cg.add(var.set_input_obst_pin(pin))
 
     cg.add(var.set_obst_sleep_low(config[CONF_OBST_SLEEP_LOW]))
+    if config.get(CONF_REQUIRE_LIMIT_SWITCH_ENDPOINTS):
+        cg.add(var.set_require_limit_switch_endpoints(True))
 
     if config.get(CONF_DRY_CONTACT_OPEN_SENSOR):
         dry_contact_open_sensor = await cg.get_variable(
@@ -361,8 +364,6 @@ async def to_code(config):
                 config[CONF_OBSTRUCTION_WHILE_CLOSING]
             )
         )
-    if config.get(CONF_REQUIRE_LIMIT_SWITCH_ENDPOINTS):
-        cg.add(var.set_require_limit_switch_endpoints(True))
 
     if config.get(CONF_ENCODER_PIN_A):
         pin = await cg.gpio_pin_expression(config[CONF_ENCODER_PIN_A])

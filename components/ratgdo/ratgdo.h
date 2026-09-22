@@ -183,6 +183,19 @@ public:
     void set_input_gdo_pin(InternalGPIOPin* pin) { this->input_gdo_pin_ = pin; }
     void set_input_obst_pin(InternalGPIOPin* pin) { this->input_obst_pin_ = pin; }
     void set_obst_sleep_low(bool low) { this->flags_.obst_sleep_low = low; }
+#ifdef PROTOCOL_DRYCONTACT
+    void set_require_limit_switch_endpoints(bool value) { this->flags_.require_limit_switch_endpoints = value; }
+#endif
+    // Whether door_open()/door_close() may assume the endpoint once the travel
+    // duration has passed without a status update.
+    bool assume_endpoint_after_travel() const
+    {
+#ifdef PROTOCOL_DRYCONTACT
+        return !this->flags_.require_limit_switch_endpoints;
+#else
+        return true;
+#endif
+    }
 
     // dry contact methods
     void set_dry_contact_open_sensor(esphome::binary_sensor::BinarySensor* dry_contact_open_sensor_);
@@ -195,7 +208,6 @@ public:
     void set_dry_contact_toggle_while_stopped(DryContactBehavior b) { this->dc_toggle_while_stopped_ = b; }
     void set_dry_contact_obstruction_while_opening(DryContactBehavior b) { this->dc_obstruction_while_opening_ = b; }
     void set_dry_contact_obstruction_while_closing(DryContactBehavior b) { this->dc_obstruction_while_closing_ = b; }
-    void set_require_limit_switch_endpoints(bool value) { this->flags_.require_limit_switch_endpoints = value; }
 #endif
 
 #ifdef RATGDO_USE_ENCODER
@@ -427,6 +439,9 @@ protected:
     struct {
         uint8_t obstruction_sensor_detected : 1;
         uint8_t obst_sleep_low : 1;
+#ifdef PROTOCOL_DRYCONTACT
+        uint8_t require_limit_switch_endpoints : 1; // OPEN/CLOSED only from the limit switches
+#endif
 #ifdef RATGDO_USE_VEHICLE_SENSORS
         uint8_t presence_detect_window_active : 1;
 #endif
@@ -438,21 +453,9 @@ protected:
         uint8_t enc_position_stop_pending : 1;
 #endif
 #ifdef PROTOCOL_DRYCONTACT
-        uint8_t dc_toggle_pending : 1; // an automatic toggle was sent and its result is not resolved yet
-        uint8_t require_limit_switch_endpoints : 1; // OPEN/CLOSED only from the limit switches
+        uint8_t dc_toggle_pending : 1; // a toggle was sent and its result is not resolved yet
 #endif
     } flags_ { 0 };
-
-    // Whether door_open()/door_close() may assume the endpoint once the travel
-    // duration has passed without a status update.
-    bool assume_endpoint_after_travel() const
-    {
-#ifdef PROTOCOL_DRYCONTACT
-        return !this->flags_.require_limit_switch_endpoints;
-#else
-        return true;
-#endif
-    }
 
 #ifdef RATGDO_USE_ENCODER
     esphome::sensor::Sensor* encoder_sensor_ { nullptr };
@@ -474,31 +477,39 @@ protected:
     InternalGPIOPin* enc_pin_b_ { nullptr };
 #endif
 
+    // Obstruction hooks for obstruction_loop(); they only act on dry contact.
+    bool dry_contact_closing_beam_broken() const;
+    void dry_contact_obstruction_started();
+
 #ifdef PROTOCOL_DRYCONTACT
     // Dry contact toggle behavior, see DRY CONTACT TOGGLE BEHAVIOR in ratgdo.cpp
-    uint32_t dc_next_toggle_ms_ { 0 }; // earliest time the next automatic press may be sent
+    uint32_t dc_next_toggle_ms_ { 0 }; // earliest time for the next automatic press
     DryContactBehavior dc_toggle_while_opening_ { DryContactBehavior::UNSET };
     DryContactBehavior dc_toggle_while_closing_ { DryContactBehavior::UNSET };
     DryContactBehavior dc_toggle_while_stopped_ { DryContactBehavior::UNSET };
     DryContactBehavior dc_obstruction_while_opening_ { DryContactBehavior::UNSET };
     DryContactBehavior dc_obstruction_while_closing_ { DryContactBehavior::UNSET };
-    DoorAction dc_request_ { DoorAction::UNKNOWN }; // logical OPEN/CLOSE/STOP being worked towards, UNKNOWN when idle
-    DoorState dc_expected_ { DoorState::UNKNOWN }; // predicted result of the pending toggle
-    DoorState dc_last_direction_ { DoorState::UNKNOWN }; // last resolved OPENING or CLOSING
-    uint8_t dc_toggles_ { 0 }; // toggles sent for the current request
+    DoorAction dc_request_ { DoorAction::UNKNOWN }; // UNKNOWN when idle
+    DoorState dc_expected_state_ { DoorState::UNKNOWN }; // result of the pending toggle
+    DoorState dc_last_direction_ { DoorState::UNKNOWN };
+    uint8_t dc_toggle_count_ { 0 }; // toggles sent for the current request
 
-    bool dry_contact_request(DoorAction action);
+    bool dry_contact_toggle_configured() const;
+    bool dry_contact_state_inferred() const;
+    bool dry_contact_handle_request(DoorAction action);
+    bool dry_contact_request_reached(DoorAction action, DoorState state) const;
+    DoorState dry_contact_state_after_toggle(DoorState state) const;
+    DoorState dry_contact_state_after(DryContactBehavior behavior, DoorState moving) const;
     void dry_contact_step();
     void dry_contact_send_toggle(DoorState expected);
     void dry_contact_arm_query_state(DoorState moving);
-    void dry_contact_cancel();
+    void dry_contact_cancel_request();
     void dry_contact_on_resolved(DoorState state);
     void dry_contact_obstructed();
-    bool dry_contact_can_move_to_position(float position);
-    bool dry_contact_infer_move() const;
+    bool dry_contact_can_move_to_position(float position) const;
+    bool dry_contact_defer_move_to_position(float position);
     void dry_contact_move_started(DoorState dir);
     void dry_contact_move_stopped();
-    DoorState dry_contact_toggle_result(DoorState state) const;
 #endif
 
     // Subscriber counters for defer name allocation
@@ -609,6 +620,7 @@ namespace scheduler_ids {
         INTERVAL_STATUS_WATCHDOG,
         TIMEOUT_ENCODER_STOPPED,
         TIMEOUT_DRY_CONTACT_STEP,
+        TIMEOUT_DRY_CONTACT_MOVE,
     };
 } // namespace scheduler_ids
 
