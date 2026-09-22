@@ -189,6 +189,11 @@ public:
     void set_dry_contact_close_sensor(esphome::binary_sensor::BinarySensor* dry_contact_close_sensor_);
     void set_discrete_open_pin(InternalGPIOPin* pin) { this->protocol_->set_discrete_open_pin(pin); }
     void set_discrete_close_pin(InternalGPIOPin* pin) { this->protocol_->set_discrete_close_pin(pin); }
+#ifdef PROTOCOL_DRYCONTACT
+    void set_dry_contact_toggle_while_opening(DryContactBehavior b) { this->dc_toggle_while_opening_ = b; }
+    void set_dry_contact_toggle_while_closing(DryContactBehavior b) { this->dc_toggle_while_closing_ = b; }
+    void set_dry_contact_obstruction_while_closing(DryContactBehavior b) { this->dc_obstruction_while_closing_ = b; }
+#endif
 
 #ifdef RATGDO_USE_ENCODER
     // encoder methods
@@ -429,6 +434,10 @@ protected:
         uint8_t enc_first_update : 1; // set in set_encoder_sensor(); flags_ zero-inits to 0
         uint8_t enc_position_stop_pending : 1;
 #endif
+#ifdef PROTOCOL_DRYCONTACT
+        uint8_t dc_toggle_pending : 1; // an automatic toggle was sent and its result is not resolved yet
+        uint8_t dc_toggle_delayed : 1; // that toggle went through the closing delay (TIMEOUT_DOOR_ACTION)
+#endif
     } flags_ { 0 };
 
 #ifdef RATGDO_USE_ENCODER
@@ -449,6 +458,28 @@ protected:
     int8_t enc_dir_correction_intended_ { 0 }; // direction to retry: +1=open, -1=close
     InternalGPIOPin* enc_pin_a_ { nullptr };
     InternalGPIOPin* enc_pin_b_ { nullptr };
+#endif
+
+#ifdef PROTOCOL_DRYCONTACT
+    // Dry contact toggle behavior, see DRY CONTACT TOGGLE BEHAVIOR in ratgdo.cpp
+    uint32_t dc_next_toggle_ms_ { 0 }; // earliest time the next automatic toggle may be sent
+    DryContactBehavior dc_toggle_while_opening_ { DryContactBehavior::UNSET };
+    DryContactBehavior dc_toggle_while_closing_ { DryContactBehavior::UNSET };
+    DryContactBehavior dc_obstruction_while_closing_ { DryContactBehavior::UNSET };
+    DoorAction dc_request_ { DoorAction::UNKNOWN }; // logical OPEN/CLOSE/STOP being worked towards, UNKNOWN when idle
+    DoorState dc_expected_ { DoorState::UNKNOWN }; // predicted result of the pending toggle
+    DoorState dc_last_direction_ { DoorState::UNKNOWN }; // last resolved OPENING or CLOSING
+    uint8_t dc_toggles_ { 0 }; // toggles sent for the current request
+
+    bool dry_contact_request(DoorAction action);
+    void dry_contact_step();
+    void dry_contact_send_toggle(DoorState expected);
+    void dry_contact_cancel();
+    bool dry_contact_cancel_delayed_toggle();
+    void dry_contact_on_resolved(DoorState state);
+    void dry_contact_obstructed();
+    bool dry_contact_can_move_to_position(float position);
+    DoorState dry_contact_toggle_result(DoorState state) const;
 #endif
 
     // Subscriber counters for defer name allocation
@@ -558,6 +589,7 @@ namespace scheduler_ids {
         TIMEOUT_SYNC,
         INTERVAL_STATUS_WATCHDOG,
         TIMEOUT_ENCODER_STOPPED,
+        TIMEOUT_DRY_CONTACT_STEP,
     };
 } // namespace scheduler_ids
 

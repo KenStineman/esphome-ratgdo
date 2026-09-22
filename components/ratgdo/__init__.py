@@ -147,6 +147,18 @@ CONF_ENCODER_PIN_A = "encoder_pin_a"
 CONF_ENCODER_PIN_B = "encoder_pin_b"
 CONF_ENCODER_SENSOR = "encoder_sensor"
 
+# What one press of the dry contact single button does while the door moves, and
+# what the opener does by itself when the obstruction sensor trips while closing.
+CONF_TOGGLE_WHILE_OPENING = "toggle_while_opening"
+CONF_TOGGLE_WHILE_CLOSING = "toggle_while_closing"
+CONF_OBSTRUCTION_WHILE_CLOSING = "obstruction_while_closing"
+DryContactBehavior = ratgdo_ns.enum("DryContactBehavior", is_class=True)
+DRY_CONTACT_BEHAVIORS = {
+    "ignore": DryContactBehavior.IGNORE,
+    "stop": DryContactBehavior.STOP,
+    "reverse": DryContactBehavior.REVERSE,
+}
+
 
 def validate_protocol(config):
     is_dry = config.get(CONF_PROTOCOL, None) == PROTOCOL_DRYCONTACT
@@ -176,6 +188,18 @@ def validate_protocol(config):
             "dry_contact_open_sensor and dry_contact_close_sensor are only valid "
             "when using protocol drycontact"
         )
+
+    behavior_keys = (
+        CONF_TOGGLE_WHILE_OPENING,
+        CONF_TOGGLE_WHILE_CLOSING,
+        CONF_OBSTRUCTION_WHILE_CLOSING,
+    )
+    if not is_dry and any(key in config for key in behavior_keys):
+        raise cv.Invalid(
+            f"{', '.join(behavior_keys)} are only valid when using protocol drycontact"
+        )
+    if CONF_OBSTRUCTION_WHILE_CLOSING in config and not config.get(CONF_INPUT_OBST):
+        raise cv.Invalid(f"{CONF_OBSTRUCTION_WHILE_CLOSING} requires {CONF_INPUT_OBST}")
 
     if has_encoder:
         has_pin_a = CONF_ENCODER_PIN_A in config
@@ -230,6 +254,15 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_ENCODER_PIN_A): pins.internal_gpio_input_pin_schema,
             cv.Optional(CONF_ENCODER_PIN_B): pins.internal_gpio_input_pin_schema,
             cv.Optional(CONF_ENCODER_SENSOR): cv.use_id(sensor.Sensor),
+            cv.Inclusive(CONF_TOGGLE_WHILE_OPENING, "dry_contact_toggle"): cv.enum(
+                DRY_CONTACT_BEHAVIORS, lower=True
+            ),
+            cv.Inclusive(CONF_TOGGLE_WHILE_CLOSING, "dry_contact_toggle"): cv.enum(
+                DRY_CONTACT_BEHAVIORS, lower=True
+            ),
+            cv.Optional(CONF_OBSTRUCTION_WHILE_CLOSING): cv.enum(
+                DRY_CONTACT_BEHAVIORS, lower=True
+            ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
     validate_protocol,
@@ -275,6 +308,20 @@ async def to_code(config):
     if config.get(CONF_ENCODER_SENSOR):
         encoder_sensor = await cg.get_variable(config[CONF_ENCODER_SENSOR])
         cg.add(var.set_encoder_sensor(encoder_sensor))
+
+    if CONF_TOGGLE_WHILE_OPENING in config:
+        cg.add(
+            var.set_dry_contact_toggle_while_opening(config[CONF_TOGGLE_WHILE_OPENING])
+        )
+        cg.add(
+            var.set_dry_contact_toggle_while_closing(config[CONF_TOGGLE_WHILE_CLOSING])
+        )
+    if CONF_OBSTRUCTION_WHILE_CLOSING in config:
+        cg.add(
+            var.set_dry_contact_obstruction_while_closing(
+                config[CONF_OBSTRUCTION_WHILE_CLOSING]
+            )
+        )
 
     if config.get(CONF_ENCODER_PIN_A):
         pin = await cg.gpio_pin_expression(config[CONF_ENCODER_PIN_A])
