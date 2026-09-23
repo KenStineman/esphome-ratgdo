@@ -818,24 +818,13 @@ void RATGDOComponent::cancel_door_state_expiry()
     this->cancel_timeout(TIMEOUT_DOOR_STATE_EXPIRY);
 }
 
-void RATGDOComponent::door_open()
+// Assume the endpoint if no status update arrives within the travel duration.
+void RATGDOComponent::arm_door_query_state(DoorState moving)
 {
-#ifdef PROTOCOL_DRYCONTACT
-    if (this->dry_contact_handle_request(DoorAction::OPEN)) {
+    if (!this->assume_endpoint_after_travel()) {
         return;
     }
-#endif
-    if (*this->door_state == DoorState::OPENING) {
-        return; // gets ignored by opener
-    }
-
-#ifdef RATGDO_USE_ENCODER
-    // Record intended direction so on_encoder_update can detect a wrong-way GDO response.
-    enc_intended_dir_ = 1;
-#endif
-    this->door_action(DoorAction::OPEN);
-
-    if (*this->opening_duration > 0 && this->assume_endpoint_after_travel()) {
+    if (moving == DoorState::OPENING && *this->opening_duration > 0) {
         // query state in case we don't get a status message
         this->set_timeout(
             TIMEOUT_DOOR_QUERY_STATE, (*this->opening_duration + 2) * 1000,
@@ -853,7 +842,40 @@ void RATGDOComponent::door_open()
                     this->query_status(); // query in case we're wrong and it's stopped
                 }
             });
+    } else if (moving == DoorState::CLOSING && *this->closing_duration > 0) {
+        // query state in case we don't get a status message
+        this->set_timeout(
+            TIMEOUT_DOOR_QUERY_STATE, (*this->closing_duration + 2) * 1000,
+            [this]() {
+                if (*this->door_state != DoorState::CLOSED
+                    && *this->door_state != DoorState::STOPPED
+                    && *this->door_state != DoorState::OPEN) {
+                    this->received(DoorState::CLOSED); // probably missed a status
+                                                       // message, assume it's closed
+                    this->query_status(); // query in case we're wrong and it's stopped
+                }
+            });
     }
+}
+
+void RATGDOComponent::door_open()
+{
+#ifdef PROTOCOL_DRYCONTACT
+    if (this->dry_contact_handle_request(DoorAction::OPEN)) {
+        return;
+    }
+#endif
+    if (*this->door_state == DoorState::OPENING) {
+        return; // gets ignored by opener
+    }
+
+#ifdef RATGDO_USE_ENCODER
+    // Record intended direction so on_encoder_update can detect a wrong-way GDO response.
+    enc_intended_dir_ = 1;
+#endif
+    this->door_action(DoorAction::OPEN);
+
+    this->arm_door_query_state(DoorState::OPENING);
 }
 
 void RATGDOComponent::door_close()
@@ -909,20 +931,7 @@ void RATGDOComponent::door_close()
         this->door_action(DoorAction::TOGGLE);
     }
 
-    if (*this->closing_duration > 0 && this->assume_endpoint_after_travel()) {
-        // query state in case we don't get a status message
-        this->set_timeout(
-            TIMEOUT_DOOR_QUERY_STATE, (*this->closing_duration + 2) * 1000,
-            [this]() {
-                if (*this->door_state != DoorState::CLOSED
-                    && *this->door_state != DoorState::STOPPED
-                    && *this->door_state != DoorState::OPEN) {
-                    this->received(DoorState::CLOSED); // probably missed a status
-                                                       // message, assume it's closed
-                    this->query_status(); // query in case we're wrong and it's stopped
-                }
-            });
-    }
+    this->arm_door_query_state(DoorState::CLOSING);
 }
 
 void RATGDOComponent::door_stop()
@@ -1037,8 +1046,9 @@ void RATGDOComponent::cancel_position_sync_callbacks()
 // The two obstruction hooks are called from obstruction_loop() on every protocol and
 // only act on dry contact.
 
-// The opener keeps the sensor awake while closing, so no asleep test applies: leaving
-// CLEAR while closing means the beam was broken.
+// While the door is closing, a momentary break in the pulses (at or below
+// PULSES_LOWER_LIMIT) is an obstruction: the sensor is active throughout the close and the
+// opener reverses as soon as the beam breaks.
 bool RATGDOComponent::dry_contact_closing_beam_broken() const
 {
 #ifdef PROTOCOL_DRYCONTACT
@@ -1182,7 +1192,7 @@ void RATGDOComponent::dry_contact_step()
             LOG_STR_ARG(DoorAction_to_string(this->dc_request_)), LOG_STR_ARG(DoorState_to_string(state)));
         this->dc_request_ = DoorAction::UNKNOWN;
         if (state == DoorState::OPENING || state == DoorState::CLOSING) {
-            this->dry_contact_arm_query_state(state);
+            this->arm_door_query_state(state);
         }
         return;
     }
@@ -1250,36 +1260,6 @@ void RATGDOComponent::dry_contact_send_toggle(DoorState expected)
     // Inferred on the next scheduler tick so that a caller can register its
     // on_door_state() callback first.
     this->set_timeout(TIMEOUT_DRY_CONTACT_STEP, delay, [this] { this->received(this->dc_expected_state_); });
-}
-
-// The same query timers as door_open() and door_close(), for a sequence that ends moving.
-void RATGDOComponent::dry_contact_arm_query_state(DoorState moving)
-{
-    if (!this->assume_endpoint_after_travel()) {
-        return;
-    }
-    if (moving == DoorState::OPENING && *this->opening_duration > 0) {
-        this->set_timeout(TIMEOUT_DOOR_QUERY_STATE, (*this->opening_duration + 2) * 1000, [this]() {
-            if (*this->door_state != DoorState::OPEN
-                && *this->door_state != DoorState::STOPPED
-#ifdef RATGDO_USE_ENCODER
-                && *this->door_state != DoorState::CLOSED
-#endif
-            ) {
-                this->received(DoorState::OPEN); // probably missed a status message, assume it's open
-                this->query_status();
-            }
-        });
-    } else if (moving == DoorState::CLOSING && *this->closing_duration > 0) {
-        this->set_timeout(TIMEOUT_DOOR_QUERY_STATE, (*this->closing_duration + 2) * 1000, [this]() {
-            if (*this->door_state != DoorState::CLOSED
-                && *this->door_state != DoorState::STOPPED
-                && *this->door_state != DoorState::OPEN) {
-                this->received(DoorState::CLOSED); // probably missed a status message, assume it's closed
-                this->query_status();
-            }
-        });
-    }
 }
 
 // The presses of door_move_to_position() are applied to the door state so that the

@@ -250,6 +250,7 @@ public:
     void door_stop();
 
     void door_action(DoorAction action);
+    void arm_door_query_state(DoorState moving);
     void ensure_door_action(DoorAction action, uint32_t delay = 1500);
     void door_move_to_position(float position);
     void set_door_position(float door_position) { this->door_position = door_position; }
@@ -502,7 +503,6 @@ protected:
     DoorState dry_contact_state_after(DryContactBehavior behavior, DoorState moving) const;
     void dry_contact_step();
     void dry_contact_send_toggle(DoorState expected);
-    void dry_contact_arm_query_state(DoorState moving);
     void dry_contact_cancel_request();
     void dry_contact_on_resolved(DoorState state);
     void dry_contact_obstructed();
