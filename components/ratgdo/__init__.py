@@ -147,6 +147,29 @@ CONF_ENCODER_PIN_A = "encoder_pin_a"
 CONF_ENCODER_PIN_B = "encoder_pin_b"
 CONF_ENCODER_SENSOR = "encoder_sensor"
 
+CONF_TOGGLE_WHILE_OPENING = "toggle_while_opening"
+CONF_TOGGLE_WHILE_CLOSING = "toggle_while_closing"
+CONF_TOGGLE_WHILE_STOPPED = "toggle_while_stopped"
+DryContactBehavior = ratgdo_ns.enum("DryContactBehavior", is_class=True)
+DRY_CONTACT_BEHAVIORS = {
+    "ignore": DryContactBehavior.IGNORE,
+    "stop": DryContactBehavior.STOP,
+    "reverse": DryContactBehavior.REVERSE,
+}
+DRY_CONTACT_STOPPED_BEHAVIORS = {
+    "ignore": DryContactBehavior.IGNORE,
+    "reverse": DryContactBehavior.REVERSE,
+}
+TOGGLE_GROUP_MSG = (
+    "toggle_while_opening, toggle_while_closing and toggle_while_stopped "
+    "must be set together"
+)
+DRY_CONTACT_BEHAVIOR_KEYS = (
+    CONF_TOGGLE_WHILE_OPENING,
+    CONF_TOGGLE_WHILE_CLOSING,
+    CONF_TOGGLE_WHILE_STOPPED,
+)
+
 
 def validate_protocol(config):
     is_dry = config.get(CONF_PROTOCOL, None) == PROTOCOL_DRYCONTACT
@@ -175,6 +198,14 @@ def validate_protocol(config):
         raise cv.Invalid(
             "dry_contact_open_sensor and dry_contact_close_sensor are only valid "
             "when using protocol drycontact"
+        )
+
+    if (not is_dry or has_encoder) and any(
+        key in config for key in DRY_CONTACT_BEHAVIOR_KEYS
+    ):
+        raise cv.Invalid(
+            f"{', '.join(DRY_CONTACT_BEHAVIOR_KEYS)} require protocol drycontact "
+            "without encoder_sensor"
         )
 
     if has_encoder:
@@ -230,6 +261,15 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_ENCODER_PIN_A): pins.internal_gpio_input_pin_schema,
             cv.Optional(CONF_ENCODER_PIN_B): pins.internal_gpio_input_pin_schema,
             cv.Optional(CONF_ENCODER_SENSOR): cv.use_id(sensor.Sensor),
+            cv.Inclusive(
+                CONF_TOGGLE_WHILE_OPENING, "dry_contact_toggle", msg=TOGGLE_GROUP_MSG
+            ): cv.enum(DRY_CONTACT_BEHAVIORS, lower=True),
+            cv.Inclusive(
+                CONF_TOGGLE_WHILE_CLOSING, "dry_contact_toggle", msg=TOGGLE_GROUP_MSG
+            ): cv.enum(DRY_CONTACT_BEHAVIORS, lower=True),
+            cv.Inclusive(
+                CONF_TOGGLE_WHILE_STOPPED, "dry_contact_toggle", msg=TOGGLE_GROUP_MSG
+            ): cv.enum(DRY_CONTACT_STOPPED_BEHAVIORS, lower=True),
         }
     ).extend(cv.COMPONENT_SCHEMA),
     validate_protocol,
@@ -329,3 +369,12 @@ async def to_code(config):
     if config.get(CONF_DISCRETE_CLOSE_PIN):
         pin = await cg.gpio_pin_expression(config[CONF_DISCRETE_CLOSE_PIN])
         cg.add(var.set_discrete_close_pin(pin))
+
+    if CONF_TOGGLE_WHILE_OPENING in config:
+        cg.add(
+            var.set_dry_contact_toggle_behavior(
+                config[CONF_TOGGLE_WHILE_OPENING],
+                config[CONF_TOGGLE_WHILE_CLOSING],
+                config[CONF_TOGGLE_WHILE_STOPPED],
+            )
+        )

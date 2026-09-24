@@ -189,6 +189,11 @@ public:
     void set_dry_contact_close_sensor(esphome::binary_sensor::BinarySensor* dry_contact_close_sensor_);
     void set_discrete_open_pin(InternalGPIOPin* pin) { this->protocol_->set_discrete_open_pin(pin); }
     void set_discrete_close_pin(InternalGPIOPin* pin) { this->protocol_->set_discrete_close_pin(pin); }
+    void set_dry_contact_toggle_behavior(DryContactBehavior while_opening, DryContactBehavior while_closing,
+        DryContactBehavior while_stopped)
+    {
+        this->protocol_->set_toggle_behavior(while_opening, while_closing, while_stopped);
+    }
 
 #ifdef RATGDO_USE_ENCODER
     // encoder methods
@@ -300,6 +305,7 @@ public:
     void sync();
 
     using Component::cancel_interval;
+    using Component::cancel_timeout;
     using Component::set_interval;
     using Component::set_timeout;
 
@@ -560,6 +566,7 @@ namespace scheduler_ids {
         TIMEOUT_SYNC,
         INTERVAL_STATUS_WATCHDOG,
         TIMEOUT_ENCODER_STOPPED,
+        TIMEOUT_DRY_CONTACT_STEP,
     };
 } // namespace scheduler_ids
 

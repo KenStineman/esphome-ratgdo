@@ -57,6 +57,9 @@ namespace dry_contact {
 
         Result call(Args args);
 
+        void set_toggle_behavior(DryContactBehavior while_opening, DryContactBehavior while_closing,
+            DryContactBehavior while_stopped);
+
         const Traits& traits() const { return this->traits_; }
 
     protected:
@@ -70,6 +73,33 @@ namespace dry_contact {
 
         // Traits (likely aligned structure)
         Traits traits_;
+
+        // Toggle sequence, see TOGGLE SEQUENCE in dry_contact.cpp
+        static constexpr uint32_t MIN_TOGGLE_INTERVAL_MS = 600; // press is held 500 ms
+        static constexpr uint8_t MAX_TOGGLES = 4; // worst case needs 3
+        uint32_t next_toggle_ms_ { 0 };
+        DryContactBehavior toggle_while_opening_ { DryContactBehavior::UNSET };
+        DryContactBehavior toggle_while_closing_ { DryContactBehavior::UNSET };
+        DryContactBehavior toggle_while_stopped_ { DryContactBehavior::UNSET };
+        DoorAction request_ { DoorAction::UNKNOWN }; // UNKNOWN when idle
+        DoorState expected_state_ { DoorState::UNKNOWN };
+        DoorState last_direction_ { DoorState::UNKNOWN };
+        uint8_t toggle_count_ { 0 };
+        bool toggle_pending_ { false };
+        bool delayed_press_ { false };
+
+        void report(DoorState state);
+        bool toggle_configured() const;
+        bool sequence_action(DoorAction action);
+        void press(DoorAction action);
+        bool request_reached(DoorAction action, DoorState state) const;
+        DoorState state_after(DryContactBehavior behavior, DoorState moving) const;
+        DoorState state_after_toggle(DoorState state) const;
+        void step();
+        void send_toggle(DoorState expected);
+        void cancel_request();
+        void cancel_step();
+        void on_resolved(DoorState state);
 
         // Small members grouped at the end
         DoorState door_state_;
