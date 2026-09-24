@@ -683,10 +683,43 @@ void RATGDOComponent::obstruction_loop()
         //     PULSES_LOWER_LIMIT, current_millis - last_asleep
         // );
 
+#ifdef PROTOCOL_DRYCONTACT
+        // pulses per CHECK_PERIOD while awake, averaged over consecutive full windows
+        constexpr uint8_t FULL_WINDOWS_TO_LEARN = 3;
+        static float pulse_average = 0;
+        static uint8_t full_windows = 0;
+        const uint32_t pulses = this->isr_store_.obstruction_low_count;
+        const float count = static_cast<float>(pulses) * CHECK_PERIOD / (current_millis - last_millis);
+        const bool settled = current_millis - last_asleep > 700;
+        const bool moving = *this->door_state == DoorState::OPENING || *this->door_state == DoorState::CLOSING;
+        const bool low = settled && pulse_average > 0 && count < pulse_average - PULSES_LOWER_LIMIT;
+        const bool partial = moving && low;
+        if (settled && pulses > PULSES_LOWER_LIMIT && !low) {
+            if (full_windows < FULL_WINDOWS_TO_LEARN) {
+                full_windows++;
+            }
+        } else {
+            full_windows = 0;
+        }
+#else
+        constexpr bool partial = false;
+#endif
+
         // check to see if we got more then PULSES_LOWER_LIMIT pulses
-        if (this->isr_store_.obstruction_low_count > PULSES_LOWER_LIMIT) {
+        if (this->isr_store_.obstruction_low_count > PULSES_LOWER_LIMIT && !partial) {
             this->obstruction_state = ObstructionState::CLEAR;
             this->flags_.obstruction_sensor_detected = true;
+#ifdef PROTOCOL_DRYCONTACT
+            if (full_windows >= FULL_WINDOWS_TO_LEARN) {
+                pulse_average = pulse_average > 0 ? pulse_average + (count - pulse_average) / 8 : count;
+            }
+        } else if (low && *this->door_state == DoorState::CLOSING
+            && *this->obstruction_state == ObstructionState::CLEAR) {
+            // closing: sensor awake, beam break = obstruction
+            this->obstruction_state = ObstructionState::OBSTRUCTED;
+        } else if (partial && pulses > PULSES_LOWER_LIMIT) {
+            // partial window during a break: state unchanged
+#endif
         } else if (this->isr_store_.obstruction_low_count == 0) {
             // if there have been no pulses the line is steady high or low
             if (this->input_obst_pin_->digital_read() != this->flags_.obst_sleep_low) {
