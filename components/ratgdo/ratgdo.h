@@ -230,6 +230,8 @@ public:
     void door_stop();
 
     void door_action(DoorAction action);
+    void set_open_endpoint_timer();
+    void set_closed_endpoint_timer();
     void ensure_door_action(DoorAction action, uint32_t delay = 1500);
     void door_move_to_position(float position);
     void set_door_position(float door_position) { this->door_position = door_position; }
