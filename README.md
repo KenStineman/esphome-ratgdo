@@ -69,6 +69,8 @@ The three `toggle_while_*` settings go together. Open, Close and Stop then send 
 
 `obstruction_while_*` requires the obstruction input. It describes what the opener does by itself when the sensor trips, and the inferred status follows: on the example opener, an obstruction while closing changes the status to opening.
 
+With the `toggle_while_*` settings, move to position starts only from fully open or fully closed, where one toggle can only move the door toward the target, and ends reported stopped at the new position. A move is ignored when the door is not fully open or closed, or when the opener does not stop on a toggle in that direction.
+
 These settings are not available with an encoder.
 
 ## Troubleshooting

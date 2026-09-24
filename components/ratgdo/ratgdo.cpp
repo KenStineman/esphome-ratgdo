@@ -945,6 +945,9 @@ void RATGDOComponent::door_action(DoorAction action)
 
 void RATGDOComponent::door_move_to_position(float position)
 {
+    if (!this->protocol_->can_move_to_position(position)) {
+        return;
+    }
     if (*this->door_state == DoorState::OPENING || *this->door_state == DoorState::CLOSING) {
         this->door_action(DoorAction::STOP);
         this->on_door_state([this, position](DoorState s) {

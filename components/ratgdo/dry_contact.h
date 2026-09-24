@@ -60,6 +60,7 @@ namespace dry_contact {
         void set_toggle_behavior(DryContactBehavior while_opening, DryContactBehavior while_closing,
             DryContactBehavior while_stopped);
         void set_obstruction_behavior(DryContactBehavior while_opening, DryContactBehavior while_closing);
+        bool can_move_to_position(float position);
 
         const Traits& traits() const { return this->traits_; }
 

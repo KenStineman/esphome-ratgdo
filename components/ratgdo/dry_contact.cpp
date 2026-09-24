@@ -436,6 +436,36 @@ namespace dry_contact {
         this->report(this->state_after(behavior, state));
     }
 
+    // With toggle_while_* set, a move starts only from fully open or fully closed, where
+    // one press can only move the door toward the target, and ends with a STOP.
+    bool DryContact::can_move_to_position(float position)
+    {
+        if (!this->toggle_configured()) {
+            return true;
+        }
+        const DoorState state = *this->ratgdo_->door_state;
+        if (state != DoorState::OPEN && state != DoorState::CLOSED) {
+            ESP_LOGW(TAG, "Door is not fully open or closed, ignoring move to position");
+            return false;
+        }
+        const bool opening = state == DoorState::CLOSED;
+        if ((position > *this->ratgdo_->door_position) != opening) {
+            ESP_LOGW(TAG, "Target is not away from the limit, ignoring move to position");
+            return false;
+        }
+        const DoorState dir = opening ? DoorState::OPENING : DoorState::CLOSING;
+        if (this->state_after_toggle(dir) != DoorState::STOPPED) {
+            ESP_LOGW(TAG, "Opener does not stop on toggle while %s, ignoring move to position",
+                LOG_STR_ARG(DoorState_to_string(dir)));
+            return false;
+        }
+        if (static_cast<int32_t>(this->next_toggle_ms_ - millis()) > 0) {
+            ESP_LOGW(TAG, "Previous press still in progress, ignoring move to position");
+            return false;
+        }
+        return true;
+    }
+
 } // namespace dry_contact
 } // namespace esphome::ratgdo
 
