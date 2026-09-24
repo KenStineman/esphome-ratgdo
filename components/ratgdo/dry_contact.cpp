@@ -25,6 +25,16 @@ namespace dry_contact {
         this->limits_.close_limit_reached = 0;
         this->limits_.last_close_limit = 0;
         this->door_state_ = DoorState::UNKNOWN;
+
+        if (this->obstruction_while_opening_ != DryContactBehavior::UNSET
+            || this->obstruction_while_closing_ != DryContactBehavior::UNSET) {
+            // not deferred: a brief OBSTRUCTED is followed by CLEAR one check later
+            this->ratgdo_->obstruction_state.subscribe([this](ObstructionState state) {
+                if (state == ObstructionState::OBSTRUCTED) {
+                    this->obstructed();
+                }
+            });
+        }
     }
 
     void DryContact::loop()
@@ -39,6 +49,12 @@ namespace dry_contact {
                 LOG_STR_ARG(DryContactBehavior_to_string(this->toggle_while_opening_)),
                 LOG_STR_ARG(DryContactBehavior_to_string(this->toggle_while_closing_)),
                 LOG_STR_ARG(DryContactBehavior_to_string(this->toggle_while_stopped_)));
+        }
+        if (this->obstruction_while_opening_ != DryContactBehavior::UNSET
+            || this->obstruction_while_closing_ != DryContactBehavior::UNSET) {
+            ESP_LOGCONFIG(TAG, "  Obstruction while opening: %s, closing: %s",
+                LOG_STR_ARG(DryContactBehavior_to_string(this->obstruction_while_opening_)),
+                LOG_STR_ARG(DryContactBehavior_to_string(this->obstruction_while_closing_)));
         }
     }
 
@@ -169,6 +185,12 @@ namespace dry_contact {
         this->toggle_while_opening_ = while_opening;
         this->toggle_while_closing_ = while_closing;
         this->toggle_while_stopped_ = while_stopped;
+    }
+
+    void DryContact::set_obstruction_behavior(DryContactBehavior while_opening, DryContactBehavior while_closing)
+    {
+        this->obstruction_while_opening_ = while_opening;
+        this->obstruction_while_closing_ = while_closing;
     }
 
     bool DryContact::toggle_configured() const
@@ -388,6 +410,30 @@ namespace dry_contact {
             }
         }
         this->step();
+    }
+
+    // What the opener does by itself when the obstruction sensor trips while moving.
+    void DryContact::obstructed()
+    {
+        const DoorState state = *this->ratgdo_->door_state;
+        DryContactBehavior behavior = DryContactBehavior::UNSET;
+        if (state == DoorState::OPENING) {
+            behavior = this->obstruction_while_opening_;
+        } else if (state == DoorState::CLOSING) {
+            behavior = this->obstruction_while_closing_;
+        }
+        if (behavior == DryContactBehavior::UNSET || behavior == DryContactBehavior::IGNORE) {
+            return;
+        }
+        if (this->request_ != DoorAction::UNKNOWN) {
+            ESP_LOGD(TAG, "Obstruction, dropping %s", LOG_STR_ARG(DoorAction_to_string(this->request_)));
+            this->cancel_request();
+        }
+        // opener reacts by itself; endpoint timer would report the old endpoint
+        this->ratgdo_->cancel_timeout(scheduler_ids::TIMEOUT_DOOR_QUERY_STATE);
+        ESP_LOGD(TAG, "Obstruction while %s, behavior %s", LOG_STR_ARG(DoorState_to_string(state)),
+            LOG_STR_ARG(DryContactBehavior_to_string(behavior)));
+        this->report(this->state_after(behavior, state));
     }
 
 } // namespace dry_contact

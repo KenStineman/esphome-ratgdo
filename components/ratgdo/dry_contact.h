@@ -59,6 +59,7 @@ namespace dry_contact {
 
         void set_toggle_behavior(DryContactBehavior while_opening, DryContactBehavior while_closing,
             DryContactBehavior while_stopped);
+        void set_obstruction_behavior(DryContactBehavior while_opening, DryContactBehavior while_closing);
 
         const Traits& traits() const { return this->traits_; }
 
@@ -81,6 +82,8 @@ namespace dry_contact {
         DryContactBehavior toggle_while_opening_ { DryContactBehavior::UNSET };
         DryContactBehavior toggle_while_closing_ { DryContactBehavior::UNSET };
         DryContactBehavior toggle_while_stopped_ { DryContactBehavior::UNSET };
+        DryContactBehavior obstruction_while_opening_ { DryContactBehavior::UNSET };
+        DryContactBehavior obstruction_while_closing_ { DryContactBehavior::UNSET };
         DoorAction request_ { DoorAction::UNKNOWN }; // UNKNOWN when idle
         DoorState expected_state_ { DoorState::UNKNOWN };
         DoorState last_direction_ { DoorState::UNKNOWN };
@@ -100,6 +103,7 @@ namespace dry_contact {
         void cancel_request();
         void cancel_step();
         void on_resolved(DoorState state);
+        void obstructed();
 
         // Small members grouped at the end
         DoorState door_state_;
