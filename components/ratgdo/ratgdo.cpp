@@ -42,6 +42,10 @@ static constexpr int SYNC_DELAY = 1000;
 // stale callbacks before a user could reasonably trigger an unrelated
 // door state change.
 static constexpr uint32_t DOOR_STATE_CALLBACK_TIMEOUT = 2000;
+static constexpr uint32_t CHECK_PERIOD = 50; // obstruction_loop() check period
+static constexpr uint32_t PULSES_LOWER_LIMIT = 3; // pulses in a check for an awake sensor
+static constexpr uint32_t ASLEEP_SETTLE_MS = 700; // after the sensor last read asleep, before an obstruction is reported
+static constexpr uint8_t NORMALIZED_PULSE_WINDOW_SIZE = 40; // CLEAR checks per normalized pulse average, about 2 s
 
 // Grace period for the opener to broadcast a state change after the encoder detects movement.
 // If movement continues without an opener update beyond this threshold, it is attributed to manual operation.
@@ -673,9 +677,6 @@ void RATGDOComponent::obstruction_loop()
     // If at least 3 low pulses are counted within 50ms, the door is awake, not
     // obstructed and we don't have to check anything else
 
-    constexpr uint32_t CHECK_PERIOD = 50;
-    constexpr uint32_t PULSES_LOWER_LIMIT = 3;
-
     if (current_millis - last_millis > CHECK_PERIOD) {
         // ESP_LOGD(TAG, "%ld: Obstruction count: %d, expected: %d, since asleep:
         // %ld",
@@ -683,43 +684,18 @@ void RATGDOComponent::obstruction_loop()
         //     PULSES_LOWER_LIMIT, current_millis - last_asleep
         // );
 
-#ifdef PROTOCOL_DRYCONTACT
-        // pulses per CHECK_PERIOD while awake, averaged over consecutive full windows
-        constexpr uint8_t FULL_WINDOWS_TO_LEARN = 3;
-        static float pulse_average = 0;
-        static uint8_t full_windows = 0;
-        const uint32_t pulses = this->isr_store_.obstruction_low_count;
-        const float count = static_cast<float>(pulses) * CHECK_PERIOD / (current_millis - last_millis);
-        const bool settled = current_millis - last_asleep > 700;
-        const bool moving = *this->door_state == DoorState::OPENING || *this->door_state == DoorState::CLOSING;
-        const bool low = settled && pulse_average > 0 && count < pulse_average - PULSES_LOWER_LIMIT;
-        const bool partial = moving && low;
-        if (settled && pulses > PULSES_LOWER_LIMIT && !low) {
-            if (full_windows < FULL_WINDOWS_TO_LEARN) {
-                full_windows++;
-            }
-        } else {
-            full_windows = 0;
-        }
-#else
-        constexpr bool partial = false;
-#endif
+        // pulses per CHECK_PERIOD
+        const float normalized_pulses
+            = static_cast<float>(this->isr_store_.obstruction_low_count) * CHECK_PERIOD / (current_millis - last_millis);
+        const bool awake = current_millis - last_asleep > ASLEEP_SETTLE_MS;
 
         // check to see if we got more then PULSES_LOWER_LIMIT pulses
-        if (this->isr_store_.obstruction_low_count > PULSES_LOWER_LIMIT && !partial) {
+        if (this->isr_store_.obstruction_low_count > PULSES_LOWER_LIMIT) {
             this->obstruction_state = ObstructionState::CLEAR;
             this->flags_.obstruction_sensor_detected = true;
-#ifdef PROTOCOL_DRYCONTACT
-            if (full_windows >= FULL_WINDOWS_TO_LEARN) {
-                pulse_average = pulse_average > 0 ? pulse_average + (count - pulse_average) / 8 : count;
+            if (awake) {
+                this->update_normalized_pulse_average(normalized_pulses);
             }
-        } else if (low && *this->door_state == DoorState::CLOSING
-            && *this->obstruction_state == ObstructionState::CLEAR) {
-            // closing: sensor awake, beam break = obstruction
-            this->obstruction_state = ObstructionState::OBSTRUCTED;
-        } else if (partial && pulses > PULSES_LOWER_LIMIT) {
-            // partial window during a break: state unchanged
-#endif
         } else if (this->isr_store_.obstruction_low_count == 0) {
             // if there have been no pulses the line is steady high or low
             if (this->input_obst_pin_->digital_read() != this->flags_.obst_sleep_low) {
@@ -728,13 +704,39 @@ void RATGDOComponent::obstruction_loop()
             } else {
                 // if the line is high and was last asleep more than 700ms ago, then
                 // there is an obstruction present
-                if (current_millis - last_asleep > 700) {
+                if (awake) {
                     this->obstruction_state = ObstructionState::OBSTRUCTED;
                 }
             }
         }
+#ifdef PROTOCOL_DRYCONTACT
+        // Dry contact: while closing, a check with pulses, but fewer than the normalized pulse
+        // average less PULSES_LOWER_LIMIT, is a beam break. A check with no pulses is handled above.
+        if (awake && *this->door_state == DoorState::CLOSING && this->isr_store_.obstruction_low_count > 0
+            && this->normalized_pulse_average_ > 0
+            && normalized_pulses < this->normalized_pulse_average_ - PULSES_LOWER_LIMIT) {
+            this->obstruction_state = ObstructionState::OBSTRUCTED;
+        }
+#endif
         last_millis = current_millis;
         this->isr_store_.obstruction_low_count = 0;
+    }
+}
+
+// Average of normalized pulses (per CHECK_PERIOD) over the last
+// NORMALIZED_PULSE_WINDOW_SIZE CLEAR checks. A check more than PULSES_LOWER_LIMIT
+// below the average is a beam break and is left out.
+void RATGDOComponent::update_normalized_pulse_average(float normalized_pulses)
+{
+    if (this->normalized_pulse_average_ > 0
+        && normalized_pulses < this->normalized_pulse_average_ - PULSES_LOWER_LIMIT) {
+        return;
+    }
+    this->normalized_pulse_sum_ += normalized_pulses;
+    if (++this->normalized_pulse_samples_ == NORMALIZED_PULSE_WINDOW_SIZE) {
+        this->normalized_pulse_average_ = this->normalized_pulse_sum_ / NORMALIZED_PULSE_WINDOW_SIZE;
+        this->normalized_pulse_sum_ = 0;
+        this->normalized_pulse_samples_ = 0;
     }
 }
 
